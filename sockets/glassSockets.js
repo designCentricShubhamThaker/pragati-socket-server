@@ -148,7 +148,7 @@ export default function glassSockets(io, socket) {
     try {
       console.log("⚙️ [Socket] Glass production update received:", payload);
 
-      // 1. Call API (or DB update directly)
+
       const glassRes = await fetch(
         `https://doms-k1fi.onrender.com/api/masters/glass/production/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
         {
@@ -200,4 +200,362 @@ export default function glassSockets(io, socket) {
       socket.emit("glassProductionError", err.message);
     }
   });
+
+  // Add this socket handler to your glassSockets.js file
+  socket.on("updateGlassVehicle", async (payload) => {
+    const { order_number, item_id, component_id, updateData } = payload;
+
+    try {
+      console.log("🚛 [Socket] Glass vehicle update received:", payload);
+
+      const vehicleRes = await fetch(
+        `https://doms-k1fi.onrender.com/api/masters/glass/vehicle/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updateData), // Send the updateData directly which contains vehicle_details array
+        }
+      );
+
+      const vehicleResponse = await vehicleRes.json();
+      console.log(vehicleResponse);
+
+      if (!vehicleRes.ok || !vehicleResponse.success) {
+        throw new Error(vehicleResponse.message || "Vehicle update failed");
+      }
+
+
+      const updatedComponent = {
+        component_id: component_id,
+        vehicle_details: vehicleResponse.data
+      };
+
+      console.log("🔧 [Socket] Formatted component for frontend:", updatedComponent);
+
+      socket.emit("glassVehicleUpdatedSelf", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent
+      });
+
+      io.to("glass").emit("glassVehicleUpdated", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent
+      });
+
+    } catch (err) {
+      console.error("❌ [Socket] Glass vehicle update error:", err.message);
+      socket.emit("glassVehicleError", err.message);
+    }
+  });
+
+  socket.on("dispatchGlassComponent", async (payload) => {
+    const { order_number, item_id, component_id, updateData } = payload;
+
+    try {
+      console.log("📦 [Socket] Order dispatch request received:", payload);
+
+      const dispatchRes = await fetch(
+        `https://doms-k1fi.onrender.com/api/masters/glass/dispatch/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updateData),
+        }
+      );
+
+      const dispatchResponse = await dispatchRes.json();
+      console.log(dispatchResponse);
+
+      if (!dispatchRes.ok || !dispatchResponse.success) {
+        throw new Error(dispatchResponse.message || "Dispatch failed");
+      }
+
+      const comp = dispatchResponse?.data?.component;
+      const itemStatus = dispatchResponse?.data?.item_status;
+      const orderStatus = dispatchResponse?.data?.order_status;
+
+      const updatedComponent = {
+        component_id: comp?.component_id,
+        name: comp?.name,
+        status: comp?.status,
+        dispatch_date: comp?.dispatch_date,
+        dispatched_by: comp?.dispatched_by,
+        tracking: []
+      };
+      const itemChanges = {
+        item_id,
+        new_status: itemStatus,
+      };
+
+      const orderChanges = {
+        order_number,
+        new_status: orderStatus,
+      };
+
+      socket.emit("glassDispatchUpdatedSelf", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent,
+        itemChanges,
+        orderChanges
+      });
+
+      io.to("glass").emit("glassDispatchUpdated", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent,
+        itemChanges,
+        orderChanges
+      });
+
+    } catch (err) {
+      console.error("❌ [Socket] Order dispatch error:", err.message);
+      socket.emit("orderDispatchError", err.message);
+    }
+  });
+
+
+  socket.on("rollbackGlassProduction", async (payload) => {
+    const { order_number, item_id, component_id, updateData, component_data_code } = payload;
+
+    try {
+      console.log("🔄 [Socket] Glass rollback request received:", payload);
+
+      // First, clear vehicle details by sending empty array
+      console.log("🚛 [Socket] Clearing vehicle details before rollback...");
+      const vehicleRes = await fetch(
+        `https://doms-k1fi.onrender.com/api/masters/glass/vehicle/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vehicle_details: [] }),
+        }
+      );
+
+      const vehicleResponse = await vehicleRes.json();
+      console.log("🚛 [Socket] Vehicle clearing response:", vehicleResponse);
+
+      if (!vehicleRes.ok || !vehicleResponse.success) {
+        throw new Error(vehicleResponse.message || "Vehicle clearing failed");
+      }
+
+      const clearedComponent = {
+        component_id: component_id,
+        vehicle_details: [] 
+      };
+
+      socket.emit("glassVehicleUpdatedSelf", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent: clearedComponent
+      });
+
+      io.to("glass").emit("glassVehicleUpdated", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent: clearedComponent
+      });
+
+      console.log("✅ [Socket] Vehicle details cleared, proceeding with rollback...");
+
+      // Now proceed with the rollback operation
+      const res = await fetch(
+        `https://doms-k1fi.onrender.com/api/orders/rollback/component/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updateData),
+        }
+      );
+
+      const response = await res.json();
+      console.log("🔄 [Socket] Rollback API response:", response);
+
+      if (!res.ok || !response.success) {
+        throw new Error(response.message || "Rollback failed");
+      }
+
+      const componentChanges = response?.data?.component_changes;
+      const itemChanges = response?.data?.item_changes;
+      const orderChanges = response?.data?.order_changes;
+
+      const updatedComponent = {
+        component_id: componentChanges?.component_id,
+        name: componentChanges?.component_name,
+        component_type: componentChanges?.component_type,
+        status: componentChanges?.new_status,
+        completed_qty: componentChanges?.new_completed_qty,
+        tracking: [],
+        vehicle_details: []
+      };
+
+      socket.emit("glassRollbackUpdatedSelf", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent,
+        itemChanges,
+        orderChanges
+      });
+
+      io.to("glass").emit("glassRollbackUpdated", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent,
+        itemChanges,
+        orderChanges
+      });
+
+      if (updateData.quantity_to_rollback > 0) {
+        console.log("📦 [Socket] Adjusting stock...");
+
+        const stockRes = await fetch(
+          `https://doms-k1fi.onrender.com/api/masters/glass/stock/adjust/${component_data_code}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ adjustment: updateData.quantity_to_rollback }),
+          }
+        );
+
+        const stockResponse = await stockRes.json();
+        if (!stockRes.ok || !stockResponse.success) {
+          throw new Error(stockResponse.message || "Stock adjustment failed");
+        }
+
+        const updatedGlass = stockResponse?.data;
+
+        socket.emit("glassStockAdjustedSelf", {
+          dataCode: updatedGlass?.data_code,
+          newStock: updatedGlass?.available_stock,
+        });
+
+        io.to("glass").emit("glassStockAdjusted", {
+          dataCode: updatedGlass?.data_code,
+          newStock: updatedGlass?.available_stock,
+        });
+
+        console.log("✅ [Socket] Stock adjusted successfully");
+      }
+
+      console.log("✅ [Socket] Glass rollback completed successfully");
+
+    } catch (err) {
+      console.error("❌ [Socket] Glass rollback error:", err.message);
+      socket.emit("glassRollbackError", { message: err.message });
+    }
+  });
+
+   socket.on("negativeAdjustmentGlassComponent", async (payload) => {
+  const { order_number, item_id, component_id, updateData } = payload;
+
+  try {
+    console.log("⚙️ [Socket] glass negative adjustment received:", payload);
+    if (!order_number || !item_id || !component_id || !updateData) {
+      throw new Error("Missing required parameters for negative adjustment");
+    }
+
+    if (!updateData.reason || updateData.reason.trim() === '') {
+      throw new Error("Reason is required for negative adjustment");
+    }
+
+    const res = await fetch(
+      `https://doms-k1fi.onrender.com/api/masters/glass/production/adjust-negative/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          adjustment: Number(updateData.quantity_to_remove),
+          username: updateData.username || "glass_admin",
+          reason: updateData.reason,
+        }),
+      }
+    );
+
+    const response = await res.json();
+    if (!res.ok || !response.success) {
+      throw new Error(response.message || "Negative adjustment failed");
+    }
+
+    console.log("✅ [API] Negative adjustment successful:", response.data);
+
+    const comp = response?.data?.component;
+    const adjustmentSummary = response?.data?.adjustment_summary;
+    const orderStatus = response?.data?.order_status;
+
+    const updatedComponent = {
+      component_id: comp?.component_id,
+      name: comp?.name,
+      status: comp?.status,
+      completed_qty: comp?.completed_qty,
+      ordered_qty: comp?.ordered_qty,
+      remaining_qty: comp?.remaining_qty,
+      tracking: comp?.tracking || response?.data?.tracking || []
+    };
+
+    const itemChanges = {
+      item_id,
+      new_status: comp?.status === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS",
+    };
+
+    const orderChanges = {
+      order_number,
+      new_status: orderStatus,
+    };
+
+    socket.emit("glassNegativeAdjustmentUpdatedSelf", {
+      order_number,
+      item_id,
+      component_id,
+      updatedComponent,
+      adjustmentSummary: {
+        total_removed: adjustmentSummary?.total_removed,
+        removed_from_stock: adjustmentSummary?.removed_from_stock,
+        removed_from_produced: adjustmentSummary?.removed_from_produced,
+        previous_completed: adjustmentSummary?.previous_completed,
+        current_completed: adjustmentSummary?.current_completed,
+        username: adjustmentSummary?.username,
+        reason: adjustmentSummary?.reason
+      },
+      itemChanges,
+      orderChanges
+    });
+
+    io.to("glass").emit("glassNegativeAdjustmentUpdated", {
+      order_number,
+      item_id,
+      component_id,
+      updatedComponent,
+      adjustmentSummary: {
+        total_removed: adjustmentSummary?.total_removed,
+        removed_from_stock: adjustmentSummary?.removed_from_stock,
+        removed_from_produced: adjustmentSummary?.removed_from_produced,
+        previous_completed: adjustmentSummary?.previous_completed,
+        current_completed: adjustmentSummary?.current_completed,
+        username: adjustmentSummary?.username,
+        reason: adjustmentSummary?.reason
+      },
+      itemChanges,
+      orderChanges
+    });
+
+    console.log("📢 [Socket] Negative adjustment broadcasted successfully");
+
+  } catch (err) {
+    console.error("❌ [Socket] glass negative adjustment error:", err.message);
+
+    socket.emit("glassNegativeAdjustmentError", { 
+      message: err.message || "Negative adjustment operation failed"
+    });
+  }
+});
 }
