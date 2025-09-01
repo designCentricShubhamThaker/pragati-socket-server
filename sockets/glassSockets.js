@@ -558,4 +558,54 @@ export default function glassSockets(io, socket) {
     });
   }
 });
+
+socket.on("updatePrintingProduction", async (payload) => {
+  const { team, order_number, item_id, component_id, updateData } = payload;
+
+  console.log(payload, 'payload')
+
+  try {
+    console.log("🖨️ [Socket] Printing production update received:", payload);
+
+    const response = await fetch(
+      `https://doms-k1fi.onrender.com/api/deco/production/${team}/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updateData),
+      }
+    );
+
+    const result = await response.json();
+    console.log("🖨️ [Socket] API Response:", result);
+
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "Printing production update failed");
+    }
+
+
+    const updatedComponent = result?.data;
+    console.log(updatedComponent, 'updated-data');
+  
+    socket.emit("printingProductionUpdatedSelf", { 
+      order_number, 
+      item_id, 
+      component_id, 
+      updatedComponent 
+    });
+
+    io.to("printing").emit("printingProductionUpdated", { 
+      order_number, 
+      item_id, 
+      component_id, 
+      updatedComponent 
+    });
+
+    console.log("✅ [Socket] Printing production update successful");
+
+  } catch (err) {
+    console.error("❌ [Socket] Printing production update error:", err.message);
+    socket.emit("printingProductionError", err.message);
+  }
+});
 }
