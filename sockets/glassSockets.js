@@ -1,5 +1,5 @@
-import fetch from "node-fetch";import { getTeamsToNotify } from "../utils/DecorationSequence.js";
-;
+import fetch from "node-fetch";
+
 
 const username = "glass_admin";
 
@@ -7,11 +7,19 @@ export default function glassSockets(io, socket) {
 
   socket.on("joinGlass", () => {
     socket.join("glass");
-    console.log(`[JOIN] Client ${socket.id} joined room: glass`);
+    socket.join("decoration");
+    console.log(`[JOIN] Client ${socket.id} joined room: glass and decoration`);
     socket.emit("joinedGlass", { message: "You have joined the glass room" });
   });
 
-  // Handle glass stock update
+  socket.on("joinDecoration", ({ team }) => {
+    socket.join("glass"); 
+    socket.join("decoration"); 
+    socket.join(team); 
+    console.log(`[JOIN] Client ${socket.id} joined rooms: glass, decoration, and ${team}`);
+    socket.emit("joinedDecoration", { message: `You have joined the ${team} team room` });
+  });
+
   socket.on("updateGlassStock", async ({ data_code, adjustment }) => {
     console.log(`[REQ] Client ${socket.id} requested stock update`, { data_code, adjustment });
 
@@ -113,7 +121,6 @@ export default function glassSockets(io, socket) {
     try {
       console.log(`🗑️ [Socket] Delete request received for glassId: ${productId}`);
 
-      // Call your existing API
       const response = await fetch(
         `https://doms-k1fi.onrender.com/api/masters/glass/${productId}`,
         {
@@ -124,13 +131,11 @@ export default function glassSockets(io, socket) {
       if (response.ok) {
         console.log(`✅ [Socket] Glass ${productId} deleted via API`);
 
-        // ✅ Emit back only to the requester (acknowledgement)
         socket.emit("glassDeletedSelf", {
           productId,
           message: "Glass deleted successfully",
         });
 
-        // ✅ Broadcast to all glass room clients (including sender if joined)
         io.to("glass").emit("glassDeleted", { productId });
       } else {
         console.warn(`⚠️ [Socket] Failed to delete glass ${productId}`);
@@ -201,7 +206,6 @@ export default function glassSockets(io, socket) {
     }
   });
 
-  // Add this socket handler to your glassSockets.js file
   socket.on("updateGlassVehicle", async (payload) => {
     const { order_number, item_id, component_id, updateData } = payload;
 
@@ -213,7 +217,7 @@ export default function glassSockets(io, socket) {
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updateData), // Send the updateData directly which contains vehicle_details array
+          body: JSON.stringify(updateData),
         }
       );
 
@@ -255,7 +259,7 @@ export default function glassSockets(io, socket) {
     const { order_number, item_id, component_id, updateData } = payload;
 
     try {
-      console.log("📦 [Socket] Order dispatch request received:", payload);
+      console.log("📦 [Socket] Glass dispatch request received:", payload);
 
       const dispatchRes = await fetch(
         `https://doms-k1fi.onrender.com/api/masters/glass/dispatch/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
@@ -285,7 +289,7 @@ export default function glassSockets(io, socket) {
         dispatched_by: comp?.dispatched_by,
         tracking: []
       };
-      
+
       const itemChanges = {
         item_id,
         new_status: itemStatus,
@@ -296,6 +300,7 @@ export default function glassSockets(io, socket) {
         new_status: orderStatus,
       };
 
+      // Emit to glass room
       socket.emit("glassDispatchUpdatedSelf", {
         order_number,
         item_id,
@@ -314,32 +319,131 @@ export default function glassSockets(io, socket) {
         orderChanges
       });
 
-      // NEW: Notify next team in decoration sequence
-      if (comp?.deco_sequence) {
-        const teamsToNotify = getTeamsToNotify(comp.deco_sequence, 'glass');
-        console.log(`🔔 [Socket] Notifying teams: ${teamsToNotify.join(', ')}`);
-        
-        teamsToNotify.forEach(team => {
-          io.to(team).emit("decorationTeamNotification", {
-            type: "READY_FOR_WORK",
-            message: `Glass component ${comp.name} is ready for ${team} work`,
+      // MODIFIED: Send vehicle details to ALL teams in sequence but mark approval state
+      if (comp?.deco_sequence && comp?.vehicle_details) {
+        const sequence = parseDecorationSequence(comp.deco_sequence);
+        const firstTeam = sequence[0];
+
+        console.log(`🚛 [Socket] Sending vehicle details to all decoration teams: ${sequence.join(', ')}`);
+
+        // Send vehicle details to ALL teams in the sequence
+        sequence.forEach(team => {
+          const canApprove = team === firstTeam; // Only first team can approve
+
+          io.to("decoration").emit("vehicleDetailsReceived", {
             order_number,
             item_id,
             component_id,
             component_name: comp.name,
-            previous_team: 'glass',
-            current_team: team
+            vehicle_details: comp.vehicle_details,
+            deco_sequence: comp.deco_sequence,
+            from_team: 'glass',
+            can_approve: canApprove,
+            approval_team: firstTeam,
+            team_position: sequence.indexOf(team),
+            total_teams: sequence.length
+          });
+        });
+
+        // Notify only the first team they can approve vehicles
+        if (firstTeam) {
+          io.to(firstTeam).emit("vehicleApprovalRequired", {
+            order_number,
+            item_id,
+            component_id,
+            component_name: comp.name,
+            message: `Vehicle approval required for component ${comp.name}`,
+            responsible_team: firstTeam,
+            can_start_work: false // Cannot start work until approval is done
+          });
+        }
+      }
+
+    } catch (err) {
+      console.error("❌ [Socket] Glass dispatch error:", err.message);
+      socket.emit("orderDispatchError", err.message);
+    }
+  });
+
+  socket.on("approveVehicleDetails", async (payload) => {
+    const { team, order_number, item_id, component_id, vehicle_details } = payload;
+
+    try {
+      const vehicleRes = await fetch(
+        `https://doms-k1fi.onrender.com/api/masters/glass/vehicle/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vehicle_details }),
+        }
+      );
+
+      const vehicleResponse = await vehicleRes.json();
+
+      if (!vehicleRes.ok || !vehicleResponse.success) {
+        throw new Error(vehicleResponse.message || "Vehicle approval failed");
+      }
+
+      const updatedComponent = {
+        component_id: component_id,
+        vehicle_details: vehicleResponse.data,
+        vehicle_approved_by: team,
+        vehicle_approved_at: new Date().toISOString()
+      };
+
+      socket.emit("vehicleApprovalUpdatedSelf", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent
+      });
+      io.to("decoration").emit("vehicleApprovalUpdated", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent,
+        approved_by: team
+      });
+
+      const comp = vehicleResponse?.data?.component || {};
+      if (comp.deco_sequence) {
+        const sequence = parseDecorationSequence(comp.deco_sequence);
+        const firstTeam = sequence[0];
+
+        io.to(firstTeam).emit("decorationTeamNotification", {
+          type: "VEHICLES_APPROVED_CAN_START",
+          message: `Vehicles approved for component ${comp.name}. You can now start ${firstTeam} work.`,
+          order_number,
+          item_id,
+          component_id,
+          component_name: comp.name,
+          current_team: firstTeam,
+          approved_by: team,
+          can_start_work: true
+        });
+
+        sequence.slice(1).forEach(waitingTeam => {
+          io.to(waitingTeam).emit("decorationTeamNotification", {
+            type: "VEHICLES_APPROVED_WAITING",
+            message: `Vehicles approved for component ${comp.name}. Waiting for ${firstTeam} to complete their work.`,
+            order_number,
+            item_id,
+            component_id,
+            component_name: comp.name,
+            current_team: firstTeam,
+            waiting_team: waitingTeam,
+            approved_by: team,
+            can_start_work: false
           });
         });
       }
 
     } catch (err) {
-      console.error("❌ [Socket] Order dispatch error:", err.message);
-      socket.emit("orderDispatchError", err.message);
+      console.error(`❌ [Socket] Vehicle approval error:`, err.message);
+      socket.emit("vehicleApprovalError", err.message);
     }
   });
 
-  // Handle decoration team production updates (printing, coating, foiling, frosting)
   socket.on("updateDecorationProduction", async (payload) => {
     const { team, order_number, item_id, component_id, updateData } = payload;
 
@@ -363,19 +467,19 @@ export default function glassSockets(io, socket) {
       }
 
       const updatedComponent = result?.data;
-  
-      socket.emit(`${team}ProductionUpdatedSelf`, { 
-        order_number, 
-        item_id, 
-        component_id, 
-        updatedComponent 
+
+      socket.emit(`${team}ProductionUpdatedSelf`, {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent
       });
 
-      io.to(team).emit(`${team}ProductionUpdated`, { 
-        order_number, 
-        item_id, 
-        component_id, 
-        updatedComponent 
+      io.to(team).emit(`${team}ProductionUpdated`, {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent
       });
 
       console.log(`✅ [Socket] ${team} production update successful`);
@@ -386,7 +490,6 @@ export default function glassSockets(io, socket) {
     }
   });
 
-  // Handle decoration team dispatch
   socket.on("dispatchDecorationComponent", async (payload) => {
     const { team, order_number, item_id, component_id, updateData } = payload;
 
@@ -420,7 +523,7 @@ export default function glassSockets(io, socket) {
         dispatch_date: comp?.decorations?.[team]?.dispatch_date,
         dispatched_by: comp?.decorations?.[team]?.dispatched_by,
       };
-      
+
       const itemChanges = {
         item_id,
         new_status: itemStatus,
@@ -449,23 +552,44 @@ export default function glassSockets(io, socket) {
         orderChanges
       });
 
-      // NEW: Notify next team in decoration sequence
       if (comp?.deco_sequence) {
-        const teamsToNotify = getTeamsToNotify(comp.deco_sequence, team);
-        console.log(`🔔 [Socket] Notifying teams after ${team}: ${teamsToNotify.join(', ')}`);
-        
-        teamsToNotify.forEach(nextTeam => {
+        const sequence = parseDecorationSequence(comp.deco_sequence);
+        const currentTeamIndex = sequence.indexOf(team);
+        const nextTeamIndex = currentTeamIndex + 1;
+
+        console.log(`🔔 [Socket] ${team} dispatched. Current index: ${currentTeamIndex}, Next index: ${nextTeamIndex}`);
+
+        if (nextTeamIndex < sequence.length) {
+          const nextTeam = sequence[nextTeamIndex];
+
           io.to(nextTeam).emit("decorationTeamNotification", {
             type: "READY_FOR_WORK",
-            message: `Component ${comp.name} is ready for ${nextTeam} work`,
+            message: `Component ${comp.name} is ready for ${nextTeam} work. Previous ${team} work has been dispatched.`,
             order_number,
             item_id,
             component_id,
             component_name: comp.name,
             previous_team: team,
-            current_team: nextTeam
+            current_team: nextTeam,
+            can_start_work: true
           });
-        });
+
+          sequence.slice(nextTeamIndex + 1).forEach(waitingTeam => {
+            io.to(waitingTeam).emit("decorationTeamNotification", {
+              type: "STILL_WAITING",
+              message: `Component ${comp.name}: ${team} dispatched, now ${nextTeam} is working. Please wait for your turn.`,
+              order_number,
+              item_id,
+              component_id,
+              component_name: comp.name,
+              current_working_team: nextTeam,
+              waiting_team: waitingTeam,
+              can_start_work: false
+            });
+          });
+        } else {
+          console.log(`🎯 [Socket] ${team} was the last team in sequence. Component workflow complete.`);
+        }
       }
 
     } catch (err) {
@@ -474,7 +598,6 @@ export default function glassSockets(io, socket) {
     }
   });
 
-  // Rest of your existing handlers...
   socket.on("rollbackGlassProduction", async (payload) => {
     const { order_number, item_id, component_id, updateData, component_data_code } = payload;
 
@@ -499,7 +622,7 @@ export default function glassSockets(io, socket) {
 
       const clearedComponent = {
         component_id: component_id,
-        vehicle_details: [] 
+        vehicle_details: []
       };
 
       socket.emit("glassVehicleUpdatedSelf", {
@@ -704,10 +827,26 @@ export default function glassSockets(io, socket) {
     } catch (err) {
       console.error("❌ [Socket] glass negative adjustment error:", err.message);
 
-      socket.emit("glassNegativeAdjustmentError", { 
+      socket.emit("glassNegativeAdjustmentError", {
         message: err.message || "Negative adjustment operation failed"
       });
     }
   });
+}
 
+function parseDecorationSequence(deco_sequence) {
+  if (!deco_sequence) return [];
+
+  if (Array.isArray(deco_sequence)) {
+    return deco_sequence;
+  }
+
+  if (typeof deco_sequence === 'string') {
+    return deco_sequence
+      .split(/[_,]/)
+      .map(team => team.trim())
+      .filter(team => team.length > 0);
+  }
+
+  return [];
 }
