@@ -217,6 +217,7 @@ export default function glassSockets(io, socket) {
       socket.emit("glassProductionError", err.message);
     }
   });
+  console.log('hey')
 
   socket.on("updateGlassVehicle", async (payload) => {
     const { order_number, item_id, component_id, updateData } = payload;
