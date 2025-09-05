@@ -6,10 +6,21 @@ const username = "glass_admin";
 
 export default function glassSockets(io, socket) {
 
+  function logRoomMembers(io) {
+    const rooms = io.sockets.adapter.rooms;
+    for (const [room, sockets] of rooms) {
+      // ignore private rooms (socket.id === room)
+      if (room.length < 20) {
+        console.log(`Room "${room}" has sockets:`, [...sockets]);
+      }
+    }
+  }
+
   socket.on("joinGlass", () => {
     socket.join("glass");
     socket.join("decoration");
     console.log(`[JOIN] Client ${socket.id} joined room: glass and decoration`);
+    logRoomMembers(io);
     socket.emit("joinedGlass", { message: "You have joined the glass room" });
   });
 
@@ -18,6 +29,7 @@ export default function glassSockets(io, socket) {
     socket.join("decoration");
     socket.join(team);
     console.log(`[JOIN] Client ${socket.id} joined rooms: glass, decoration, and ${team}`);
+    console.log("Current rooms:", io.sockets.adapter.rooms);
     socket.emit("joinedDecoration", { message: `You have joined the ${team} team room` });
   });
 
@@ -210,8 +222,6 @@ export default function glassSockets(io, socket) {
     const { order_number, item_id, component_id, updateData } = payload;
 
     try {
-
-
       const vehicleRes = await fetch(
         `https://doms-k1fi.onrender.com/api/masters/glass/vehicle/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
         {
@@ -255,6 +265,8 @@ export default function glassSockets(io, socket) {
     }
   });
 
+
+
   socket.on("dispatchGlassComponent", async (payload) => {
     const { order_number, item_id, component_id, updateData } = payload;
 
@@ -279,7 +291,7 @@ export default function glassSockets(io, socket) {
       const itemStatus = dispatchResponse?.data?.item_status;
       const orderStatus = dispatchResponse?.data?.order_status;
 
-      // ADDED: Fetch complete component data including vehicle details
+      // Get complete component data including vehicle details
       let completeComponentData = comp;
       try {
         const componentRes = await fetch(
@@ -296,15 +308,12 @@ export default function glassSockets(io, socket) {
             completeComponentData = {
               ...comp,
               vehicle_details: componentData.data.vehicle_details || [],
-              // Include any other data that might be missing from dispatch response
               ...componentData.data
             };
-            console.log("✅ Retrieved complete component data with vehicle details:", completeComponentData.vehicle_details);
           }
         }
       } catch (fetchError) {
         console.warn("⚠️ Could not fetch complete component data, using dispatch data:", fetchError.message);
-        // Fallback to dispatch data - ensure vehicle_details is at least an empty array
         completeComponentData = {
           ...comp,
           vehicle_details: comp.vehicle_details || []
@@ -317,8 +326,9 @@ export default function glassSockets(io, socket) {
         status: completeComponentData?.status,
         dispatch_date: completeComponentData?.dispatch_date,
         dispatched_by: completeComponentData?.dispatched_by,
-        deco_sequence: completeComponentData?.deco_sequence, 
-        vehicle_details: completeComponentData?.vehicle_details, 
+        deco_sequence: completeComponentData?.deco_sequence,
+        vehicle_details: completeComponentData?.vehicle_details,
+        decorations: completeComponentData?.decorations || {},
         tracking: []
       };
 
@@ -326,7 +336,9 @@ export default function glassSockets(io, socket) {
       const orderChanges = { order_number, new_status: orderStatus };
 
       console.log(`🔄 [Socket] Broadcasting glassDispatchUpdated for order ${order_number}, item ${item_id}, component ${component_id}`);
+      console.log(`🎯 [Socket] Component ${completeComponentData.name} has sequence: ${completeComponentData.deco_sequence}`);
 
+      // Emit to glass room
       socket.emit("glassDispatchUpdatedSelf", {
         order_number,
         item_id,
@@ -344,260 +356,200 @@ export default function glassSockets(io, socket) {
         itemChanges,
         orderChanges
       });
-      console.log("yyyyyyyyyyyyyyyyy")
-      console.log(completeComponentData)
-      // Send to decoration teams with complete vehicle details
-      if (completeComponentData?.deco_sequence) {
-        const sequence = parseDecorationSequence(completeComponentData.deco_sequence);
-        const firstTeam = sequence[0];
 
-        console.log(`🎨 [Socket] Decoration sequence for ${completeComponentData.name}: ${sequence.join(" → ")}`);
-        console.log(`➡️  [Socket] Sending component ${completeComponentData.name} from glass → ${firstTeam}`);
-        console.log(`🚛 [Socket] Vehicle details being sent:`, completeComponentData.vehicle_details);
+      // Send to ALL decoration teams - frontend will filter by sequence
+      console.log(`🎨 [Socket] Sending component ${completeComponentData.name} to ALL decoration teams for filtering`);
+      console.log(`🚛 [Socket] Vehicle details count: ${completeComponentData.vehicle_details?.length || 0}`);
 
-        sequence.forEach((team, index) => {
-          const isFirstTeam = index === 0;
-          const canStartWork = isFirstTeam;
+      io.to("decoration").emit("componentDispatchedFromGlass", {
+        order_number,
+        item_id,
+        component_id,
+        component_name: completeComponentData.name,
+        component_data: {
+          ...completeComponentData,
+          vehicle_details: completeComponentData.vehicle_details || []
+        },
+        deco_sequence: completeComponentData.deco_sequence, // This is the key field for filtering
+        from_team: "glass",
+        timestamp: new Date().toISOString(),
+        message: `Component ${completeComponentData.name} dispatched from glass with sequence ${completeComponentData.deco_sequence}`
+      });
 
-          console.log(
-            `📤 [Socket] Notifying team: ${team} | From: glass | Can Start: ${canStartWork}`
-          );
+      // Send vehicle approval notification to ALL decoration teams if vehicles exist
+      if (completeComponentData.vehicle_details && completeComponentData.vehicle_details.length > 0) {
+        console.log(`🛑 [Socket] Vehicle approval notification for ${completeComponentData.name} with sequence ${completeComponentData.deco_sequence}`);
 
-          io.to(team).emit("componentReceivedFromGlass", {
-            order_number,
-            item_id,
-            component_id,
-            component_name: completeComponentData.name,
-            component_data: {
-              ...completeComponentData,
-              vehicle_details: completeComponentData.vehicle_details || []
-            },
-            deco_sequence: completeComponentData.deco_sequence,
-            from_team: "glass",
-            can_start_work: canStartWork,
-            current_team: firstTeam,
-            team_position: index,
-            total_teams: sequence.length,
-            message: isFirstTeam
-              ? `Component ${completeComponentData.name} received from glass. You can start ${team} work.`
-              : `Component ${completeComponentData.name} received from glass. Waiting for ${firstTeam} to complete their work.`
-          });
-
-          io.to("decoration").emit("componentReceivedFromGlass", {
-            order_number,
-            item_id,
-            component_id,
-            component_name: completeComponentData.name,
-            component_data: {
-              ...completeComponentData,
-              vehicle_details: completeComponentData.vehicle_details || []
-            },
-            deco_sequence: completeComponentData.deco_sequence,
-            from_team: "glass",
-            can_start_work: canStartWork,
-            current_team: firstTeam,
-            team_position: index,
-            total_teams: sequence.length,
-            target_team: team,
-            message: isFirstTeam
-              ? `Component ${completeComponentData.name} received from glass. You can start ${team} work.`
-              : `Component ${completeComponentData.name} received from glass. Waiting for ${firstTeam} to complete their work.`
-          });
-
-          // Send vehicle details with complete data
-          if (completeComponentData.vehicle_details && completeComponentData.vehicle_details.length > 0) {
-            console.log(
-              `🚚 [Socket] Sending vehicle details of ${completeComponentData.name} to ${team}:`,
-              completeComponentData.vehicle_details
-            );
-
-            io.to(team).emit("vehicleDetailsReceived", {
-              order_number,
-              item_id,
-              component_id,
-              component_name: completeComponentData.name,
-              vehicle_details: completeComponentData.vehicle_details,
-              deco_sequence: completeComponentData.deco_sequence,
-              from_team: "glass",
-              can_approve: isFirstTeam,
-              approval_team: firstTeam,
-              team_position: index,
-              total_teams: sequence.length
-            });
-
-            io.to("decoration").emit("vehicleDetailsReceived", {
-              order_number,
-              item_id,
-              component_id,
-              component_name: completeComponentData.name,
-              vehicle_details: completeComponentData.vehicle_details,
-              deco_sequence: completeComponentData.deco_sequence,
-              from_team: "glass",
-              can_approve: isFirstTeam,
-              approval_team: firstTeam,
-              team_position: index,
-              total_teams: sequence.length,
-              target_team: team
-            });
-          }
+        io.to("decoration").emit("vehicleApprovalRequired", {
+          order_number,
+          item_id,
+          component_id,
+          component_name: completeComponentData.name,
+          vehicle_details: completeComponentData.vehicle_details,
+          deco_sequence: completeComponentData.deco_sequence, // Frontend uses this to filter
+          timestamp: new Date().toISOString(),
+          message: `Vehicle approval required for component ${completeComponentData.name} (${completeComponentData.deco_sequence})`
         });
-
-        // Vehicle approval logic with complete data
-        if (completeComponentData.vehicle_details && completeComponentData.vehicle_details.length > 0 && firstTeam) {
-          console.log(
-            `🛑 [Socket] Vehicle approval required for ${completeComponentData.name} → Responsible team: ${firstTeam}`
-          );
-
-          // Send to both team room and decoration room
-          io.to(firstTeam).emit("vehicleApprovalRequired", {
-            order_number,
-            item_id,
-            component_id,
-            component_name: completeComponentData.name,
-            vehicle_details: completeComponentData.vehicle_details, // Include vehicle details here too
-            message: `Vehicle approval required for component ${completeComponentData.name}`,
-            responsible_team: firstTeam,
-            can_start_work: false
-          });
-
-          io.to("decoration").emit("vehicleApprovalRequired", {
-            order_number,
-            item_id,
-            component_id,
-            component_name: completeComponentData.name,
-            vehicle_details: completeComponentData.vehicle_details, // Include vehicle details here too
-            message: `Vehicle approval required for component ${completeComponentData.name}`,
-            responsible_team: firstTeam,
-            can_start_work: false,
-            target_team: firstTeam
-          });
-        }
-      }else{
-         console.log("else")
       }
+
     } catch (err) {
       console.error("❌ [Socket] Glass dispatch error:", err.message);
       socket.emit("orderDispatchError", err.message);
     }
   });
 
+  socket.on("updateTeamVehicle", async (payload) => {
+    const { team, order_number, item_id, component_id, updateData, deco_sequence } = payload;
 
- socket.on("updateTeamVehicle", async (payload) => {
-  const { team, order_number, item_id, component_id, updateData } = payload;
-
-  try {
-    const vehicleRes = await fetch(
-      `https://doms-k1fi.onrender.com/api/masters/glass/vehicle/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updateData),
-      }
-    );
-
-    const vehicleResponse = await vehicleRes.json();
-
-    if (!vehicleRes.ok || !vehicleResponse.success) {
-      throw new Error(vehicleResponse.message || `${team} vehicle update failed`);
-    }
-
-    // FIX 1: Get complete component data including decoration sequence
-    let completeComponentData = null;
     try {
-      const componentRes = await fetch(
-        `https://doms-k1fi.onrender.com/api/masters/glass/component/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+      // Update vehicle details via API
+      const vehicleRes = await fetch(
+        `https://doms-k1fi.onrender.com/api/masters/glass/vehicle/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
         {
-          method: "GET",
-          headers: { "Content-Type": "application/json" }
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updateData),
         }
       );
 
-      if (componentRes.ok) {
-        const componentData = await componentRes.json();
-        if (componentData.success && componentData.data) {
-          completeComponentData = {
-            ...componentData.data,
-            vehicle_details: vehicleResponse.data // Use updated vehicle details
-          };
-        }
+      const vehicleResponse = await vehicleRes.json();
+
+      if (!vehicleRes.ok || !vehicleResponse.success) {
+        throw new Error(vehicleResponse.message || `${team} vehicle update failed`);
       }
-    } catch (fetchError) {
-      console.warn("⚠️ Could not fetch complete component data:", fetchError.message);
-    }
 
-    const updatedComponent = {
-      component_id: component_id,
-      vehicle_details: vehicleResponse.data,
-      // Add complete component data if available
-      ...(completeComponentData && {
-        deco_sequence: completeComponentData.deco_sequence,
-        decorations: completeComponentData.decorations
-      })
-    };
+      // Get component data to extract decoration sequence
+      let decoSequence = deco_sequence;
+      try {
+        const componentRes = await fetch(
+          `https://doms-k1fi.onrender.com/api/masters/glass/component/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+          {
+            method: "GET",
+            headers: { "Content-Type": "application/json" }
+          }
+        );
 
-    // Emit to specific team and generic event
-    socket.emit("vehicleDetailsUpdated", {
-      order_number,
-      item_id,
-      component_id,
-      updatedComponent
-    });
-
-    io.to(team).emit("vehicleDetailsUpdated", {
-      order_number,
-      item_id,
-      component_id,
-      updatedComponent
-    });
-
-    // FIX 2: Enhanced approval logic with proper team notification
-    const allApproved = vehicleResponse.data.every(v =>
-      v.status === "DELIVERED" || v.received === true
-    );
-
-    if (allApproved && completeComponentData?.deco_sequence) {
-      console.log(`🎉 All vehicles approved by ${team} for component ${component_id}`);
-      
-      const sequence = parseDecorationSequence(completeComponentData.deco_sequence);
-      
-      // Notify all teams in sequence that vehicles are approved
-      sequence.forEach((sequenceTeam, index) => {
-        if (sequenceTeam !== team) { // Don't notify the team that just approved
-          console.log(`📤 Notifying ${sequenceTeam}: Vehicles approved by ${team}`);
-          
-          io.to(sequenceTeam).emit("vehicleApprovalCompleted", {
-            order_number,
-            item_id,
-            component_id,
-            updatedComponent: {
-              ...updatedComponent,
-              decorations: completeComponentData.decorations
-            },
-            approved_by: team,
-            message: `Vehicles approved by ${team}. Component ready for decoration work.`
-          });
+        if (componentRes.ok) {
+          const componentData = await componentRes.json();
+          if (componentData.success && componentData.data) {
+            decoSequence = componentData.data.deco_sequence;
+          }
         }
-      });
-      
-      // Also notify decoration room
-      io.to("decoration").emit("vehicleApprovalCompleted", {
+      } catch (fetchError) {
+        console.warn("⚠️ Could not fetch decoration sequence:", fetchError.message);
+      }
+
+      // CRITICAL FIX: Always ensure we have decoration sequence
+      if (!decoSequence) {
+        console.error(`❌ [Socket] Missing decoration sequence for component ${component_id}`);
+        socket.emit("vehicleUpdateError", "Missing decoration sequence data - contact support");
+        return;
+      }
+
+      const updatedComponent = {
+        component_id: component_id,
+        vehicle_details: vehicleResponse.data,
+        deco_sequence: decoSequence
+      };
+
+      console.log(`🚛 [Socket] Vehicle updated by ${team} for component with sequence: ${decoSequence}`);
+
+      // SIMPLIFIED: Single broadcast to all decoration teams
+      io.to("decoration").emit("vehicleDetailsUpdated", {
         order_number,
         item_id,
         component_id,
-        updatedComponent: {
-          ...updatedComponent,
-          decorations: completeComponentData.decorations
-        },
-        approved_by: team,
-        message: `Vehicles approved by ${team}. Component ready for decoration work.`
+        updatedComponent,
+        updated_by: team,
+        deco_sequence: decoSequence,
+        timestamp: new Date().toISOString()
       });
-    }
 
-  } catch (err) {
-    console.error(`❌ [Socket] ${team} vehicle update error:`, err.message);
-    socket.emit("vehicleUpdateError", err.message);
-  }
-});
+      // Check if all vehicles are approved and notify if complete
+      const allApproved = vehicleResponse.data.every(v =>
+        v.status === "DELIVERED" || (v.received === true && v.approved === true)
+      );
+
+      if (allApproved) {
+        console.log(`✅ All vehicles approved for component ${component_id}`);
+
+        // SIMPLIFIED: Single notification for vehicle approval completion
+        io.to("decoration").emit("vehicleApprovalCompleted", {
+          order_number,
+          item_id,
+          component_id,
+          deco_sequence: decoSequence,
+          approved_by: team,
+          timestamp: new Date().toISOString(),
+          message: `All vehicles approved by ${team}`
+        });
+      }
+
+    } catch (err) {
+      console.error(`❌ [Socket] ${team} vehicle update error:`, err.message);
+      socket.emit("vehicleUpdateError", err.message);
+    }
+  })
+  socket.on("dispatchDecorationTeam", async (payload) => {
+    const { team, order_number, item_id, component_id, updateData } = payload;
+
+    try {
+      // Dispatch the decoration work (your existing API call)
+      const dispatchRes = await fetch(
+        `https://doms-k1fi.onrender.com/api/masters/decoration/dispatch/${encodeURIComponent(order_number)}/${item_id}/${component_id}/${team}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updateData),
+        }
+      );
+
+      const dispatchResponse = await dispatchRes.json();
+
+      if (!dispatchRes.ok || !dispatchResponse.success) {
+        throw new Error(dispatchResponse.message || "Decoration dispatch failed");
+      }
+
+      const updatedComponent = dispatchResponse.data;
+
+      // Broadcast dispatch update
+      io.to("decoration").emit("decorationDispatchUpdated", {
+        order_number,
+        item_id,
+        component_id,
+        updatedComponent,
+        dispatched_by: team,
+        timestamp: new Date().toISOString()
+      });
+
+      // NEW: Notify next team in sequence
+      if (updatedComponent?.deco_sequence) {
+        const sequence = updatedComponent.deco_sequence.split('_').filter(Boolean);
+        const currentTeamIndex = sequence.indexOf(team);
+        const nextTeam = sequence[currentTeamIndex + 1];
+
+        if (nextTeam) {
+          console.log(`🎯 [Socket] Notifying ${nextTeam} they can now start work after ${team} dispatch`);
+
+          io.to("decoration").emit("teamCanStartWork", {
+            order_number,
+            item_id,
+            component_id,
+            team: nextTeam,
+            deco_sequence: updatedComponent.deco_sequence,
+            reason: 'previous_team_dispatched',
+            previous_team: team,
+            message: `${nextTeam}: ${team} has completed their work. You can now start.`,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+    } catch (err) {
+      console.error("❌ [Socket] Decoration dispatch error:", err.message);
+      socket.emit("decorationDispatchError", err.message);
+    }
+  });
 
   socket.on("updateDecorationProduction", async (payload) => {
     const { team, order_number, item_id, component_id, updateData } = payload;
