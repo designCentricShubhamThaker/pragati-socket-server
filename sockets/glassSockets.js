@@ -135,8 +135,99 @@ socket.on("dispatchGlassComponent", async (payload) => {
   }
 });
 
+socket.on("dispatchDecorationComponent", async (payload) => {
+  const { team, order_number, item_id, component_id, updateData } = payload;
 
-// FIXED: Handle team marking single vehicle as delivered
+  try {
+    const dispatchRes = await fetch(
+      `https://doms-k1fi.onrender.com/api/deco/dispatch/${team}/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updateData),
+      }
+    );
+
+    const dispatchResponse = await dispatchRes.json();
+    if (!dispatchRes.ok || !dispatchResponse.success) {
+      throw new Error(dispatchResponse.message || `${team} dispatch failed`);
+    }
+
+    const comp = dispatchResponse?.data?.component;
+    const itemStatus = dispatchResponse?.data?.item_status;
+    const orderStatus = dispatchResponse?.data?.order_status;
+
+    const updatedComponent = {
+      component_id: comp?.component_id,
+      name: comp?.name,
+      decorations: comp?.decorations,
+      dispatch_date: comp?.decorations?.[team]?.dispatch_date,
+      dispatched_by: comp?.decorations?.[team]?.dispatched_by,
+      deco_sequence: comp?.deco_sequence,
+    };
+
+    const itemChanges = { item_id, new_status: itemStatus };
+    const orderChanges = { order_number, new_status: orderStatus };
+
+    // 1. Confirm success to the dispatching team
+    socket.emit("decorationDispatchUpdatedSelf", {
+      success: true,
+      team,
+      order_number,
+      item_id,
+      component_id,
+      updatedComponent,
+      itemChanges,
+      orderChanges
+    });
+
+    // 2. Broadcast to ALL teams in production room
+    io.to("production").emit("decorationComponentDispatched", {
+      team,
+      order_number,
+      item_id,
+      component_id,
+      updatedComponent,
+      itemChanges,
+      orderChanges,
+      timestamp: new Date().toISOString()
+    });
+
+    // 3. Notify next team in sequence
+    if (comp?.deco_sequence) {
+      const sequence = parseDecorationSequence(comp.deco_sequence);
+      const currentTeamIndex = sequence.indexOf(team);
+      const nextTeam = sequence[currentTeamIndex + 1];
+
+      if (nextTeam) {
+        io.to("production").emit("teamCanStartWork", {
+          order_number,
+          item_id,
+          component_id,
+          team: nextTeam,
+          deco_sequence: comp.deco_sequence,
+          previous_team: team,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+  } catch (err) {
+    console.error(`❌ [Socket] ${team} dispatch error:`, err.message);
+    
+    // Send error response to dispatching team
+    socket.emit("decorationDispatchUpdatedSelf", {
+      success: false,
+      team,
+      message: err.message,
+      order_number,
+      item_id,
+      component_id
+    });
+  }
+});
+
+
 socket.on("markVehicleDelivered", async (payload) => {
   const { team, order_number, item_id, component_id, updateData, deco_sequence } = payload;
 
@@ -426,103 +517,101 @@ socket.on("markAllVehiclesDelivered", async (payload) => {
     }
   });
 
-  
 
+  // socket.on("dispatchGlassComponent", async (payload) => {
+  //   const { order_number, item_id, component_id, updateData } = payload;
 
-  socket.on("dispatchGlassComponent", async (payload) => {
-    const { order_number, item_id, component_id, updateData } = payload;
+  //   try {
+  //     const dispatchRes = await fetch(
+  //       `https://doms-k1fi.onrender.com/api/masters/glass/dispatch/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+  //       {
+  //         method: "PATCH",
+  //         headers: { "Content-Type": "application/json" },
+  //         body: JSON.stringify(updateData),
+  //       }
+  //     );
 
-    try {
-      const dispatchRes = await fetch(
-        `https://doms-k1fi.onrender.com/api/masters/glass/dispatch/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updateData),
-        }
-      );
+  //     const dispatchResponse = await dispatchRes.json();
+  //     if (!dispatchRes.ok || !dispatchResponse.success) {
+  //       throw new Error(dispatchResponse.message || "Dispatch failed");
+  //     }
 
-      const dispatchResponse = await dispatchRes.json();
-      if (!dispatchRes.ok || !dispatchResponse.success) {
-        throw new Error(dispatchResponse.message || "Dispatch failed");
-      }
+  //     const comp = dispatchResponse?.data?.component;
+  //     const itemStatus = dispatchResponse?.data?.item_status;
+  //     const orderStatus = dispatchResponse?.data?.order_status;
 
-      const comp = dispatchResponse?.data?.component;
-      const itemStatus = dispatchResponse?.data?.item_status;
-      const orderStatus = dispatchResponse?.data?.order_status;
+  //     // Get complete component data
+  //     let completeComponentData = comp;
+  //     try {
+  //       const componentRes = await fetch(
+  //         `https://doms-k1fi.onrender.com/api/masters/glass/component/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
+  //         { method: "GET", headers: { "Content-Type": "application/json" } }
+  //       );
 
-      // Get complete component data
-      let completeComponentData = comp;
-      try {
-        const componentRes = await fetch(
-          `https://doms-k1fi.onrender.com/api/masters/glass/component/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
-          { method: "GET", headers: { "Content-Type": "application/json" } }
-        );
+  //       if (componentRes.ok) {
+  //         const componentData = await componentRes.json();
+  //         if (componentData.success && componentData.data) {
+  //           completeComponentData = {
+  //             ...comp,
+  //             vehicle_details: componentData.data.vehicle_details || [],
+  //             ...componentData.data
+  //           };
+  //         }
+  //       }
+  //     } catch (fetchError) {
+  //       console.warn("⚠️ Could not fetch complete component data");
+  //     }
 
-        if (componentRes.ok) {
-          const componentData = await componentRes.json();
-          if (componentData.success && componentData.data) {
-            completeComponentData = {
-              ...comp,
-              vehicle_details: componentData.data.vehicle_details || [],
-              ...componentData.data
-            };
-          }
-        }
-      } catch (fetchError) {
-        console.warn("⚠️ Could not fetch complete component data");
-      }
+  //     const updatedComponent = {
+  //       component_id: completeComponentData?.component_id,
+  //       name: completeComponentData?.name,
+  //       status: completeComponentData?.status,
+  //       dispatch_date: completeComponentData?.dispatch_date,
+  //       dispatched_by: completeComponentData?.dispatched_by,
+  //       deco_sequence: completeComponentData?.deco_sequence,
+  //       vehicle_details: completeComponentData?.vehicle_details,
+  //       decorations: completeComponentData?.decorations || {},
+  //     };
 
-      const updatedComponent = {
-        component_id: completeComponentData?.component_id,
-        name: completeComponentData?.name,
-        status: completeComponentData?.status,
-        dispatch_date: completeComponentData?.dispatch_date,
-        dispatched_by: completeComponentData?.dispatched_by,
-        deco_sequence: completeComponentData?.deco_sequence,
-        vehicle_details: completeComponentData?.vehicle_details,
-        decorations: completeComponentData?.decorations || {},
-      };
+  //     const itemChanges = { item_id, new_status: itemStatus };
+  //     const orderChanges = { order_number, new_status: orderStatus };
 
-      const itemChanges = { item_id, new_status: itemStatus };
-      const orderChanges = { order_number, new_status: orderStatus };
+  //     socket.emit("glassDispatchUpdatedSelf", {
+  //       order_number, item_id, component_id, updatedComponent, itemChanges, orderChanges
+  //     });
 
-      socket.emit("glassDispatchUpdatedSelf", {
-        order_number, item_id, component_id, updatedComponent, itemChanges, orderChanges
-      });
+  //     // Single broadcast to production room - frontend will filter by team/sequence
+  //     io.to("production").emit("componentDispatched", {
+  //       order_number,
+  //       item_id,
+  //       component_id,
+  //       component_name: completeComponentData.name,
+  //       component_data: completeComponentData,
+  //       deco_sequence: completeComponentData.deco_sequence,
+  //       from_team: "glass",
+  //       itemChanges,
+  //       orderChanges,
+  //       timestamp: new Date().toISOString(),
+  //     });
 
-      // Single broadcast to production room - frontend will filter by team/sequence
-      io.to("production").emit("componentDispatched", {
-        order_number,
-        item_id,
-        component_id,
-        component_name: completeComponentData.name,
-        component_data: completeComponentData,
-        deco_sequence: completeComponentData.deco_sequence,
-        from_team: "glass",
-        itemChanges,
-        orderChanges,
-        timestamp: new Date().toISOString(),
-      });
+  //     // Vehicle approval notification if needed
+  //     if (completeComponentData.vehicle_details && completeComponentData.vehicle_details.length > 0) {
+  //       io.to("production").emit("vehicleApprovalRequired", {
+  //         order_number,
+  //         item_id,
+  //         component_id,
+  //         component_name: completeComponentData.name,
+  //         vehicle_details: completeComponentData.vehicle_details,
+  //         deco_sequence: completeComponentData.deco_sequence,
+  //         timestamp: new Date().toISOString(),
+  //       });
+  //     }
 
-      // Vehicle approval notification if needed
-      if (completeComponentData.vehicle_details && completeComponentData.vehicle_details.length > 0) {
-        io.to("production").emit("vehicleApprovalRequired", {
-          order_number,
-          item_id,
-          component_id,
-          component_name: completeComponentData.name,
-          vehicle_details: completeComponentData.vehicle_details,
-          deco_sequence: completeComponentData.deco_sequence,
-          timestamp: new Date().toISOString(),
-        });
-      }
-
-    } catch (err) {
-      console.error("❌ [Socket] Glass dispatch error:", err.message);
-      socket.emit("orderDispatchError", err.message);
-    }
-  });
+  //   } catch (err) {
+  //     console.error("❌ [Socket] Glass dispatch error:", err.message);
+  //     socket.emit("orderDispatchError", err.message);
+  //   }
+  // });
 
   socket.on("updateTeamVehicle", async (payload) => {
     const { team, order_number, item_id, component_id, updateData, deco_sequence } = payload;
@@ -625,87 +714,7 @@ socket.on("markAllVehiclesDelivered", async (payload) => {
   });
 
 
-  socket.on("dispatchDecorationComponent", async (payload) => {
-    const { team, order_number, item_id, component_id, updateData } = payload;
-
-    try {
-      const dispatchRes = await fetch(
-        `https://doms-k1fi.onrender.com/api/deco/dispatch/${team}/${encodeURIComponent(order_number)}/${item_id}/${component_id}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updateData),
-        }
-      );
-
-      const dispatchResponse = await dispatchRes.json();
-      if (!dispatchRes.ok || !dispatchResponse.success) {
-        throw new Error(dispatchResponse.message || `${team} dispatch failed`);
-      }
-
-      const comp = dispatchResponse?.data?.component;
-      const itemStatus = dispatchResponse?.data?.item_status;
-      const orderStatus = dispatchResponse?.data?.order_status;
-
-      const updatedComponent = {
-        component_id: comp?.component_id,
-        name: comp?.name,
-        decorations: comp?.decorations,
-        dispatch_date: comp?.decorations?.[team]?.dispatch_date,
-        dispatched_by: comp?.decorations?.[team]?.dispatched_by,
-        deco_sequence: comp?.deco_sequence,
-      };
-
-      const itemChanges = { item_id, new_status: itemStatus };
-      const orderChanges = { order_number, new_status: orderStatus };
-
-      socket.emit("decorationDispatchUpdatedSelf", {
-        team,
-        order_number,
-        item_id,
-        component_id,
-        updatedComponent,
-        itemChanges,
-        orderChanges
-      });
-
-      // Single broadcast to production room with team context
-      io.to("production").emit("decorationComponentDispatched", {
-        team,
-        order_number,
-        item_id,
-        component_id,
-        updatedComponent,
-        itemChanges,
-        orderChanges,
-        timestamp: new Date().toISOString()
-      });
-
-      // Notify next team in sequence if applicable
-      if (comp?.deco_sequence) {
-        const sequence = parseDecorationSequence(comp.deco_sequence);
-        const currentTeamIndex = sequence.indexOf(team);
-        const nextTeam = sequence[currentTeamIndex + 1];
-
-        if (nextTeam) {
-          io.to("production").emit("teamCanStartWork", {
-            order_number,
-            item_id,
-            component_id,
-            team: nextTeam,
-            deco_sequence: comp.deco_sequence,
-            previous_team: team,
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
-
-    } catch (err) {
-      console.error(`❌ [Socket] ${team} dispatch error:`, err.message);
-      socket.emit("decorationDispatchError", { team, message: err.message });
-    }
-  });
-
+  
   // Glass rollback
   socket.on("rollbackGlassProduction", async (payload) => {
     const { order_number, item_id, component_id, updateData, component_data_code } = payload;
