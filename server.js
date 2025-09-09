@@ -9,12 +9,17 @@
   const server = http.createServer(app);
 
   const io = new Server(server, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST", "PATCH"],
-    },
-  });
-
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  },
+  // Add these for reliability
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  connectTimeout: 45000,
+  transports: ['websocket', 'polling'],
+  allowEIO3: true
+});
   app.use(cors());
   app.use(express.json());
 
