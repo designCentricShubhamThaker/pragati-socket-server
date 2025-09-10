@@ -432,10 +432,10 @@ socket.on("markAllVehiclesDelivered", async (payload) => {
     }
   });
 
-  socket.on("updateGlass", async ({ productId, updateData }) => {
+  socket.on("updateGlass", async ({ updateData }) => {
     try {
-      console.log("✏️ [Socket] Update Glass request", productId, updateData);
-      const response = await fetch(`https://doms-k1fi.onrender.com/api/masters/glass/${productId}`, {
+      console.log("✏️ [Socket] Update Glass request", updateData);
+      const response = await fetch(`https://doms-k1fi.onrender.com/api/masters/glass/${updateData?.data_code}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...updateData, username }),
